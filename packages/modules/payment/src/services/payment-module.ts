@@ -27,6 +27,7 @@ import {
   PaymentCollectionUpdatableFields,
   PaymentDTO,
   PaymentMethodDTO,
+  PaymentCustomerDTO,
   PaymentProviderDTO,
   PaymentSessionDTO,
   ProviderWebhookPayload,
@@ -72,6 +73,17 @@ import {
 } from "@models"
 import { joinerConfig } from "../joiner-config"
 import PaymentProviderService from "./payment-provider"
+
+const isAccountHolderNotFound = (error: unknown) =>
+  MedusaError.isMedusaError(error) &&
+  error.code === MedusaError.Codes.ACCOUNT_HOLDER_NOT_FOUND
+
+const emptyIfAccountHolderNotFound = (error: unknown) => {
+  if (!isAccountHolderNotFound(error)) {
+    throw error
+  }
+  return []
+}
 
 type InjectedDependencies = {
   logger?: Logger
@@ -422,18 +434,42 @@ export default class PaymentModuleService
         sharedContext
       )
 
-      providerPaymentSession = await this.paymentProviderService_.createSession(
-        input.provider_id,
-        {
-          context: {
-            idempotency_key: paymentSession!.id,
-            ...input.context,
-          },
-          data: { ...input.data, session_id: paymentSession!.id },
-          amount: input.amount,
-          currency_code: normalizeCurrencyCode(input.currency_code),
-        }
-      )
+      const sessionInput = {
+        context: {
+          idempotency_key: paymentSession!.id,
+          ...input.context,
+        },
+        data: { ...input.data, session_id: paymentSession!.id },
+        amount: input.amount,
+        currency_code: normalizeCurrencyCode(input.currency_code),
+      }
+
+      providerPaymentSession = await this.paymentProviderService_
+        .createSession(input.provider_id, sessionInput)
+        .catch(async (error) => {
+          const accountHolder = await this.recreateMissingAccountHolder_(
+            input.provider_id,
+            input.context?.account_holder,
+            input.context?.customer,
+            error,
+            sharedContext
+          )
+
+          return await this.paymentProviderService_.createSession(
+            input.provider_id,
+            {
+              ...sessionInput,
+              context: {
+                ...sessionInput.context,
+                account_holder: accountHolder,
+                // A changed request can't reuse the key of the failed one.
+                idempotency_key: `${paymentSession!.id}_${
+                  accountHolder.external_id
+                }`,
+              },
+            }
+          )
+        })
 
       paymentSession = await this.paymentSessionService_.update(
         {
@@ -1433,13 +1469,20 @@ export default class PaymentModuleService
     let accountHolder: InferEntityType<typeof AccountHolder> | undefined
     let providerAccountHolder: UpdateAccountHolderOutput | undefined
 
-    providerAccountHolder =
-      await this.paymentProviderService_.updateAccountHolder(
-        input.provider_id,
-        {
-          context: input.context,
-        }
-      )
+    providerAccountHolder = await this.paymentProviderService_
+      .updateAccountHolder(input.provider_id, {
+        context: input.context,
+      })
+      .catch(async (error) => {
+        const accountHolder = await this.recreateMissingAccountHolder_(
+          input.provider_id,
+          { ...input.context.account_holder, id: input.id },
+          input.context.customer,
+          error,
+          sharedContext
+        )
+        return { data: accountHolder.data }
+      })
 
     // The data field can be empty when either the method is not supported or an account holder wasn't updated
     // We still want to do the update as we might only be updating the metadata
@@ -1471,12 +1514,15 @@ export default class PaymentModuleService
 
     await this.accountHolderService_.delete(id, sharedContext)
 
-    await this.paymentProviderService_.deleteAccountHolder(
-      accountHolder.provider_id,
-      {
+    await this.paymentProviderService_
+      .deleteAccountHolder(accountHolder.provider_id, {
         context: { account_holder: accountHolder },
-      }
-    )
+      })
+      .catch((error) => {
+        if (!isAccountHolderNotFound(error)) {
+          throw error
+        }
+      })
   }
 
   @InjectManager()
@@ -1485,10 +1531,9 @@ export default class PaymentModuleService
     config: FindConfig<PaymentMethodDTO> = {},
     @MedusaContext() sharedContext?: Context
   ): Promise<PaymentMethodDTO[]> {
-    const res = await this.paymentProviderService_.listPaymentMethods(
-      filters.provider_id,
-      { context: filters.context }
-    )
+    const res = await this.paymentProviderService_
+      .listPaymentMethods(filters.provider_id, { context: filters.context })
+      .catch(emptyIfAccountHolderNotFound)
 
     return res.map((item) => ({
       id: item.id,
@@ -1503,11 +1548,9 @@ export default class PaymentModuleService
     config: FindConfig<PaymentMethodDTO> = {},
     @MedusaContext() sharedContext?: Context
   ): Promise<[PaymentMethodDTO[], number]> {
-    const paymentMethods =
-      await this.paymentProviderService_.listPaymentMethods(
-        filters.provider_id,
-        { context: filters.context }
-      )
+    const paymentMethods = await this.paymentProviderService_
+      .listPaymentMethods(filters.provider_id, { context: filters.context })
+      .catch(emptyIfAccountHolderNotFound)
 
     const normalizedResponse = paymentMethods.map((item) => ({
       id: item.id,
@@ -1538,7 +1581,33 @@ export default class PaymentModuleService
 
     const result = await promiseAll(
       input.map((item) =>
-        this.paymentProviderService_.savePaymentMethod(item.provider_id, item)
+        this.paymentProviderService_
+          .savePaymentMethod(item.provider_id, item)
+          .catch(async (error) => {
+            const accountHolder = await this.recreateMissingAccountHolder_(
+              item.provider_id,
+              item.context?.account_holder,
+              item.context?.customer,
+              error,
+              sharedContext
+            )
+
+            return await this.paymentProviderService_.savePaymentMethod(
+              item.provider_id,
+              {
+                ...item,
+                context: {
+                  ...item.context,
+                  account_holder: accountHolder,
+                  ...(item.context?.idempotency_key
+                    ? {
+                        idempotency_key: `${item.context.idempotency_key}_${accountHolder.external_id}`,
+                      }
+                    : {}),
+                },
+              }
+            )
+          })
       ),
       { aggregateErrors: true }
     )
@@ -1584,6 +1653,47 @@ export default class PaymentModuleService
       ),
       { aggregateErrors: true }
     )
+  }
+
+  /**
+   * Replaces an account holder that no longer exists in the provider, eg. because it was deleted there or the data was
+   * copied from a setup that uses a different provider account, such as a database copied between environments.
+   * The record keeps its ID, so its links stay intact. Any other error is rethrown.
+   */
+  private async recreateMissingAccountHolder_(
+    providerId: string,
+    accountHolder: Partial<AccountHolderDTO> | undefined,
+    customer: PaymentCustomerDTO | undefined,
+    error: unknown,
+    sharedContext?: Context
+  ): Promise<AccountHolderDTO> {
+    if (!isAccountHolderNotFound(error) || !accountHolder?.id || !customer) {
+      throw error
+    }
+
+    const providerAccountHolder =
+      await this.paymentProviderService_.createAccountHolder(providerId, {
+        context: {
+          customer,
+          // Shared by concurrent requests replacing the same account holder, so they create a single one.
+          idempotency_key: `${customer.id}_${accountHolder.external_id}`,
+        },
+      })
+
+    if (!isPresent(providerAccountHolder)) {
+      throw error
+    }
+
+    const updated = await this.accountHolderService_.update(
+      {
+        id: accountHolder.id,
+        external_id: providerAccountHolder.id,
+        data: providerAccountHolder.data ?? {},
+      },
+      sharedContext
+    )
+
+    return await this.baseRepository_.serialize<AccountHolderDTO>(updated)
   }
 
   @InjectManager()

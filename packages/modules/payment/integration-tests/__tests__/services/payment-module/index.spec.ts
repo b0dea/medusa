@@ -1,5 +1,6 @@
 import { IPaymentModuleService } from "@medusajs/framework/types"
 import {
+  MedusaError,
   Module,
   Modules,
   PaymentActions,
@@ -2065,6 +2066,189 @@ moduleIntegrationTestRunner<IPaymentModuleService>({
 
             expect(finalCollection.refunded_amount).toBe(300)
           })
+        })
+      })
+
+      describe("Missing account holders", () => {
+        const customer = { id: "cus_1", email: "test@test.com" }
+        const notFound = () =>
+          new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            "No such customer",
+            MedusaError.Codes.ACCOUNT_HOLDER_NOT_FOUND
+          )
+
+        let providerService: any
+        let accountHolder: any
+
+        beforeEach(async () => {
+          providerService = (service as any).paymentProviderService_
+          accountHolder = await service.createAccountHolder({
+            provider_id: "pp_system_default",
+            context: { customer },
+          })
+          jest
+            .spyOn(providerService, "createAccountHolder")
+            .mockResolvedValue({ id: "cus_new", data: { id: "cus_new" } })
+        })
+
+        afterEach(() => {
+          jest.restoreAllMocks()
+        })
+
+        const createSession = async (context: Record<string, unknown>) => {
+          const collection = await service.createPaymentCollections({
+            currency_code: "usd",
+            amount: 200,
+          })
+          return await service.createPaymentSession(collection.id, {
+            provider_id: "pp_system_default",
+            amount: 200,
+            currency_code: "usd",
+            data: {},
+            context,
+          })
+        }
+
+        it("replaces the account holder and retries the payment session", async () => {
+          const createSessionSpy = jest
+            .spyOn(providerService, "createSession")
+            .mockRejectedValueOnce(notFound())
+
+          const session = await createSession({
+            customer,
+            account_holder: accountHolder,
+          })
+
+          expect(session.id).toBeDefined()
+          expect(createSessionSpy).toHaveBeenCalledTimes(2)
+          expect(createSessionSpy.mock.calls[1][1].context).toEqual(
+            expect.objectContaining({
+              account_holder: expect.objectContaining({
+                id: accountHolder.id,
+                external_id: "cus_new",
+              }),
+              idempotency_key: `${session.id}_cus_new`,
+            })
+          )
+          expect(providerService.createAccountHolder).toHaveBeenCalledWith(
+            "pp_system_default",
+            {
+              context: {
+                customer,
+                idempotency_key: `${customer.id}_${accountHolder.external_id}`,
+              },
+            }
+          )
+          expect(await service.listAccountHolders({})).toEqual([
+            expect.objectContaining({
+              id: accountHolder.id,
+              external_id: "cus_new",
+              data: { id: "cus_new" },
+            }),
+          ])
+        })
+
+        it("doesn't replace the account holder on other errors", async () => {
+          jest
+            .spyOn(providerService, "createSession")
+            .mockRejectedValueOnce(new Error("Card declined"))
+
+          await expect(
+            createSession({ customer, account_holder: accountHolder })
+          ).rejects.toThrow("Card declined")
+          expect(providerService.createAccountHolder).not.toHaveBeenCalled()
+          expect(await service.listPaymentSessions({})).toHaveLength(0)
+        })
+
+        it("fails when the account holder is missing again after replacing it", async () => {
+          jest
+            .spyOn(providerService, "createSession")
+            .mockRejectedValueOnce(notFound())
+            .mockRejectedValueOnce(notFound())
+
+          await expect(
+            createSession({ customer, account_holder: accountHolder })
+          ).rejects.toThrow("No such customer")
+          expect(providerService.createAccountHolder).toHaveBeenCalledTimes(1)
+        })
+
+        it("can't replace the account holder without the customer", async () => {
+          jest
+            .spyOn(providerService, "createSession")
+            .mockRejectedValueOnce(notFound())
+
+          await expect(
+            createSession({ account_holder: accountHolder })
+          ).rejects.toThrow("No such customer")
+          expect(providerService.createAccountHolder).not.toHaveBeenCalled()
+        })
+
+        it("replaces the account holder when saving a payment method", async () => {
+          const saveSpy = jest
+            .spyOn(providerService, "savePaymentMethod")
+            .mockRejectedValueOnce(notFound())
+            .mockResolvedValueOnce({ id: "seti_1", data: {} })
+
+          const paymentMethod = await service.createPaymentMethods({
+            provider_id: "pp_system_default",
+            data: {},
+            context: { customer, account_holder: accountHolder },
+          })
+
+          expect(paymentMethod.id).toBe("seti_1")
+          expect(saveSpy.mock.calls[1][1].context.account_holder).toEqual(
+            expect.objectContaining({ external_id: "cus_new" })
+          )
+        })
+
+        it("replaces the account holder when updating it", async () => {
+          jest
+            .spyOn(providerService, "updateAccountHolder")
+            .mockRejectedValueOnce(notFound())
+
+          const updated = await service.updateAccountHolder({
+            id: accountHolder.id,
+            provider_id: "pp_system_default",
+            context: { customer, account_holder: accountHolder },
+          })
+
+          expect(updated).toEqual(
+            expect.objectContaining({
+              external_id: "cus_new",
+              data: { id: "cus_new" },
+            })
+          )
+        })
+
+        it("lists no payment methods", async () => {
+          jest
+            .spyOn(providerService, "listPaymentMethods")
+            .mockRejectedValue(notFound())
+
+          const context = { account_holder: accountHolder }
+          expect(
+            await service.listPaymentMethods({
+              provider_id: "pp_system_default",
+              context,
+            })
+          ).toEqual([])
+          expect(
+            await service.listAndCountPaymentMethods({
+              provider_id: "pp_system_default",
+              context,
+            })
+          ).toEqual([[], 0])
+        })
+
+        it("deletes the account holder", async () => {
+          jest
+            .spyOn(providerService, "deleteAccountHolder")
+            .mockRejectedValueOnce(notFound())
+
+          await service.deleteAccountHolder(accountHolder.id)
+
+          expect(await service.listAccountHolders({})).toHaveLength(0)
         })
       })
 

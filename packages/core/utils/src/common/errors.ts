@@ -23,6 +23,11 @@ export const MedusaErrorCodes = {
   INSUFFICIENT_INVENTORY: "insufficient_inventory",
   CART_INCOMPATIBLE_STATE: "cart_incompatible_state",
   UNKNOWN_MODULES: "unknown_modules",
+  /**
+   * Thrown by payment providers when an account holder doesn't exist in the provider anymore, so the payment module
+   * can create a new one in its place.
+   */
+  ACCOUNT_HOLDER_NOT_FOUND: "account_holder_not_found",
 }
 
 /**

@@ -40,6 +40,7 @@ import {
   AbstractPaymentProvider,
   isDefined,
   isPresent,
+  MedusaError,
   PaymentActions,
   PaymentSessionStatus,
 } from "@medusajs/framework/utils"
@@ -124,6 +125,14 @@ export class MedusaPaymentsProvider extends AbstractPaymentProvider<MedusaPaymen
       const body = await res.json().catch(() => ({}))
 
       if (!res.ok) {
+        if (body.type === "MedusaAccountHolderNotFoundError") {
+          throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            body.message,
+            MedusaError.Codes.ACCOUNT_HOLDER_NOT_FOUND
+          )
+        }
+
         throw new CloudServiceError(
           body.type,
           body.originalType,
