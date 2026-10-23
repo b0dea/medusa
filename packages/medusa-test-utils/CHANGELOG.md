@@ -1,5 +1,14 @@
 # Change Log
 
+## 2.22.1
+
+### Patch Changes
+
+- Updated dependencies [[`7c3b0339379efeda7863f48b9f60e3391cece091`](https://github.com/medusajs/medusa/commit/7c3b0339379efeda7863f48b9f60e3391cece091)]:
+  - @medusajs/core-flows@2.22.1
+  - @medusajs/medusa@2.22.1
+  - @medusajs/framework@2.22.1
+
 ## 2.22.0
 
 ### Minor Changes

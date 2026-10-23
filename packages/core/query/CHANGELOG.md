@@ -1,5 +1,13 @@
 # @medusajs/query
 
+## 2.22.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @medusajs/utils@2.22.1
+  - @medusajs/deps@2.22.1
+
 ## 2.22.0
 
 ### Minor Changes
