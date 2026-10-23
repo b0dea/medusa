@@ -4023,6 +4023,36 @@ describe("Entity builder", () => {
       ])
     })
 
+    test("should quote camelCase columns in a query builder where", () => {
+      const widget = model
+        .define("widget", {
+          id: model.id().primaryKey(),
+          externalCode: model.text().nullable(),
+          isActive: model.boolean(),
+        })
+        .indexes([
+          {
+            on: ["externalCode"],
+            unique: true,
+            where: { externalCode: { $ne: null }, isActive: true },
+          },
+        ])
+
+      const metaData = MetadataStorage.getMetadataFromDecorator(
+        toMikroORMEntity(widget)
+      )
+
+      expect(metaData.indexes).toEqual(
+        expect.arrayContaining([
+          {
+            expression:
+              'CREATE UNIQUE INDEX IF NOT EXISTS "IDX_widget_externalCode_unique" ON "widget" ("externalCode") WHERE "externalCode" IS NOT NULL AND "isActive" IS TRUE AND deleted_at IS NULL',
+            name: "IDX_widget_externalCode_unique",
+          },
+        ])
+      )
+    })
+
     test("should define indexes with a query builder", () => {
       const group = model.define("group", {
         id: model.number(),

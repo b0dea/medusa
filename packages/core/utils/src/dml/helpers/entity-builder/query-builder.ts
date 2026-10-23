@@ -37,21 +37,32 @@ function isQueryCondition(value: any): value is QueryCondition {
   return isObject(value) && value !== null && !("$ne" in value)
 }
 
+/*
+  Postgres folds unquoted identifiers to lower case, so a camelCase column has to be
+  quoted. Identifiers that folding leaves unchanged stay unquoted, which keeps the
+  expression of existing snake_case indexes identical.
+*/
+function formatColumn(key: string): string {
+  return /^[a-z_][a-z0-9_]*$/.test(key) ? key : `"${key.replace(/"/g, '""')}"`
+}
+
 function buildCondition(key: string, value: QueryValue): string {
+  const column = formatColumn(key)
+
   if (value === null) {
-    return `${key} IS NULL`
+    return `${column} IS NULL`
   } else if (isObject(value) && "$ne" in value) {
     if (value.$ne === null) {
-      return `${key} IS NOT NULL`
+      return `${column} IS NOT NULL`
     } else {
-      return `${key} != ${formatValue(value.$ne)}`
+      return `${column} != ${formatValue(value.$ne)}`
     }
   } else if (isBoolean(value)) {
-    return `${key} IS ${formatValue(value)}`
+    return `${column} IS ${formatValue(value)}`
   } else if (!isDefined(value)) {
     return ""
   } else {
-    return `${key} = ${formatValue(value)}`
+    return `${column} = ${formatValue(value)}`
   }
 }
 
